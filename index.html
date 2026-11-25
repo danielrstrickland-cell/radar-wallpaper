@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Live Radar Wallpaper</title>
+<style>
+html,body{margin:0;height:100%;background:#07090d;overflow:hidden;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#fff}
+#gl{position:fixed;inset:0;width:100%;height:100%;display:block}
+#flat{position:fixed;inset:0;perspective:1100px;display:none;align-items:center;justify-content:center;overflow:hidden}
+#flatInner{position:relative;width:1024px;height:1024px;transform-style:preserve-3d}
+#flatInner img{position:absolute;width:256px;height:256px}
+.panel{position:fixed;top:max(18px,env(safe-area-inset-top));left:max(18px,env(safe-area-inset-left));background:rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px 20px;min-width:220px;backdrop-filter:blur(8px)}
+#clock{font-size:clamp(40px,6vw,72px);font-weight:200;line-height:1;letter-spacing:-1px}
+#date{color:#b4b2a9;font-size:15px;margin-top:4px}
+.wx{display:flex;align-items:center;gap:14px;margin-top:14px}
+#temp{font-size:34px;font-weight:300}
+#place{font-size:15px;color:#e5e3dc}
+#cond,#rain,#wind{font-size:13px;color:#9a988f}
+#rain.wet{color:#8cc8ff}
+.bar{position:fixed;left:max(18px,env(safe-area-inset-left));right:max(18px,env(safe-area-inset-right));bottom:max(16px,env(safe-area-inset-bottom));background:rgba(0,0,0,.5);border-radius:12px;padding:10px 16px;display:flex;align-items:center;gap:14px;font-size:13px;color:#9a988f}
+.track{flex:1;height:4px;border-radius:2px;background:#3a3a38;position:relative}
+#prog{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:#85b7eb;width:0}
+#tlabel{min-width:56px;text-align:right;color:#d3d1c7}
+.legend{display:flex;gap:2px}.legend i{width:14px;height:6px;border-radius:1px}
+#status{position:fixed;right:18px;top:18px;font-size:12px;color:#888780}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="flat"><div id="flatInner"></div></div>
+
+<div class="panel">
+  <div id="clock">--:--</div>
+  <div id="date"></div>
+  <div class="wx">
+    <div id="temp">--°</div>
+    <div>
+      <div id="place">West Palm Beach</div>
+      <div id="cond">Loading weather…</div>
+    </div>
+  </div>
+  <div id="rain" style="margin-top:8px"></div>
+  <div id="wind"></div>
+</div>
+
+<div class="bar">
+  <span>Radar</span>
+  <div class="legend"><i style="background:#1d9e75"></i><i style="background:#97c459"></i><i style="background:#ef9f27"></i><i style="background:#e24b4a"></i><i style="background:#d4537e"></i></div>
+  <div class="track"><div id="prog"></div></div>
+  <span id="tlabel">—</span>
+</div>
+<div id="status">Loading radar…</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+{
+const Q = new URLSearchParams(location.search);
+let LAT = parseFloat(Q.get('lat')) || 26.72, LON = parseFloat(Q.get('lon')) || -80.048;
+const PLACE = Q.get('name') || 'West Palm Beach';
+const Z = parseInt(Q.get('zoom')) || 8;          // 8 ≈ 550 km across
+const S = 1024, N = 112, WORLD = 20, MAXH = 3.2;
+const OFFS = [50,45,40,35,30,25,20,15,10,5,0];   // minutes ago
+const $ = id => document.getElementById(id);
+$('place').textContent = PLACE;
+
+/* ---------- clock ---------- */
+function tick(){
+  const d = new Date();
+  $('clock').textContent = d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}).replace(/\s?[AP]M/i,'');
+  $('date').textContent = d.toLocaleDateString([], {weekday:'long', month:'short', day:'numeric'});
+}
+tick(); setInterval(tick, 10000);
+
+/* ---------- weather (Open-Meteo) ---------- */
+const WMO = {0:'Clear',1:'Mostly clear',2:'Partly cloudy',3:'Overcast',45:'Fog',48:'Fog',51:'Light drizzle',53:'Drizzle',55:'Heavy drizzle',61:'Light rain',63:'Rain',65:'Heavy rain',66:'Freezing rain',67:'Freezing rain',71:'Light snow',73:'Snow',75:'Heavy snow',80:'Rain showers',81:'Rain showers',82:'Violent showers',95:'Thunderstorm',96:'Thunderstorm, hail',99:'Thunderstorm, hail'};
+const DIRS = ['N','NE','E','SE','S','SW','W','NW'];
+async function weather(){
+  try{
+    const u = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,weather_code,wind_speed_10m,wind_direction_10m,precipitation&minutely_15=precipitation&forecast_minutely_15=12&past_minutely_15=1&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto`;
+    const j = await (await fetch(u)).json();
+    const c = j.current;
+    $('temp').textContent = Math.round(c.temperature_2m) + '°';
+    $('cond').textContent = WMO[c.weather_code] || '—';
+    $('wind').textContent = `Wind ${DIRS[Math.round(c.wind_direction_10m/45)%8]} ${Math.round(c.wind_speed_10m)} mph`;
+    const m = j.minutely_15, now = Date.now(); let msg = 'Dry for the next 3 hrs', wet = false;
+    if (c.precipitation > 0.05) { msg = 'Raining now'; wet = true; }
+    else if (m) for (let i=0;i<m.time.length;i++){
+      const t = new Date(m.time[i]).getTime();
+      if (t < now - 15*60e3) continue;
+      if (m.precipitation[i] > 0.05){ const mins = Math.max(0, Math.round((t-now)/60e3)); msg = mins <= 5 ? 'Rain starting now' : `Rain in ~${mins} min`; wet = true; break; }
+    }
+    $('rain').textContent = msg; $('rain').className = wet ? 'wet' : '';
+  }catch(e){ $('cond').textContent = 'Weather offline'; }
+}
+
+/* ---------- tile math ---------- */
+const worldPx = (lat, lon, z) => {
+  const n = 256 * 2**z, r = lat*Math.PI/180;
+  return [(lon+180)/360*n, (1 - Math.log(Math.tan(r) + 1/Math.cos(r))/Math.PI)/2*n];
+};
+function tileList(){
+  const [cx, cy] = worldPx(LAT, LON, Z), x0 = cx - S/2, y0 = cy - S/2, out = [];
+  for (let tx=Math.floor(x0/256); tx<=Math.floor((x0+S-1)/256); tx++)
+    for (let ty=Math.floor(y0/256); ty<=Math.floor((y0+S-1)/256); ty++)
+      out.push({tx, ty, dx: Math.round(tx*256-x0), dy: Math.round(ty*256-y0)});
+  return out;
+}
+const baseUrl = t => `https://${'abcd'[(t.tx+t.ty)&3]}.basemaps.cartocdn.com/dark_all/${Z}/${t.tx}/${t.ty}.png`;
+const radarUrl = (t, off, bust) => `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913${off ? '-m'+String(off).padStart(2,'0')+'m' : ''}/${Z}/${t.tx}/${t.ty}.png?_=${bust}`;
+const loadImg = (src, cors) => new Promise(res => {
+  const i = new Image(); if (cors) i.crossOrigin = 'anonymous';
+  i.onload = () => res(i); i.onerror = () => res(null); i.src = src;
+});
+
+/* ---------- radar colour -> intensity (0..1) ---------- */
+function intensity(r,g,b,a){
+  if (a < 40) return 0;
+  const mx = Math.max(r,g,b), mn = Math.min(r,g,b), d = mx - mn; if (mx < 40) return 0;
+  let h = 0;
+  if (d) h = mx===r ? ((g-b)/d)%6 : mx===g ? (b-r)/d+2 : (r-g)/d+4;
+  h = (h*60 + 360) % 360;
+  if (d < 25) return mx > 200 ? 1 : 0.1;                 // white/grey = extreme
+  if (h >= 170 && h < 260) return 0.08;                  // cyan/blue = very light
+  if (h >= 80 && h < 170) return 0.18 + (170-h)/90*0.17; // greens
+  if (h >= 48 && h < 80) return 0.5;                     // yellow
+  if (h >= 18 && h < 48) return 0.66;                    // orange
+  if (h < 18 || h >= 340) return 0.8;                    // red
+  return 0.95;                                           // magenta/purple
+}
+
+/* ---------- state ---------- */
+let frames = [], baseCanvas = null, mode = 'gl', loadedAt = 0;
+
+async function loadAll(){
+  $('status').textContent = 'Updating radar…';
+  const tiles = tileList(), bust = Math.floor(Date.now()/300000);
+  if (mode === 'flat') return fallback(tiles, bust);
+  // base map
+  const bc = document.createElement('canvas'); bc.width = bc.height = S;
+  const bx = bc.getContext('2d');
+  const bimgs = await Promise.all(tiles.map(t => loadImg(baseUrl(t), true)));
+  bimgs.forEach((im,k) => im && bx.drawImage(im, tiles[k].dx, tiles[k].dy));
+  // radar frames
+  const out = [];
+  for (const off of OFFS){
+    const imgs = await Promise.all(tiles.map(t => loadImg(radarUrl(t, off, bust), true)));
+    const c = document.createElement('canvas'); c.width = c.height = S;
+    const x = c.getContext('2d', {willReadFrequently:true});
+    imgs.forEach((im,k) => im && x.drawImage(im, tiles[k].dx, tiles[k].dy));
+    let px; try { px = x.getImageData(0,0,S,S).data; } catch(e){ return fallback(tiles, bust); }
+    const cell = S/N, h = new Float32Array(N*N), col = new Float32Array(N*N*3);
+    for (let j=0;j<N;j++) for (let i=0;i<N;i++){
+      let best = 0, bi = -1;
+      for (const [ox,oy] of [[.25,.25],[.75,.25],[.5,.5],[.25,.75],[.75,.75]]){
+        const p = ((Math.floor(j*cell+oy*cell))*S + Math.floor(i*cell+ox*cell))*4;
+        const v = intensity(px[p],px[p+1],px[p+2],px[p+3]); if (v > best){ best = v; bi = p; }
+      }
+      const k = j*N+i; h[k] = best;
+      if (bi >= 0){ col[k*3]=px[bi]/255; col[k*3+1]=px[bi+1]/255; col[k*3+2]=px[bi+2]/255; }
+    }
+    out.push({canvas:c, h, col, off});
+  }
+  baseCanvas = bc; frames = out; loadedAt = Date.now();
+  if (mode === 'gl') glSetBase();
+  $('status').textContent = '';
+}
+
+/* ---------- 3D scene ---------- */
+let renderer, scene, camera, baseTex, radarTex, radarCanvas, cols, ring, pin;
+try{
+  renderer = new THREE.WebGLRenderer({canvas:$('gl'), antialias:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  scene = new THREE.Scene(); scene.background = new THREE.Color(0x07090d);
+  scene.fog = new THREE.Fog(0x07090d, 22, 42);
+  camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+  scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x101418, 0.9));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.7); sun.position.set(-6,10,4); scene.add(sun);
+
+  baseTex = new THREE.CanvasTexture(document.createElement('canvas'));
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(WORLD, WORLD), new THREE.MeshBasicMaterial({map:baseTex}));
+  ground.rotation.x = -Math.PI/2; scene.add(ground);
+
+  radarCanvas = document.createElement('canvas'); radarCanvas.width = radarCanvas.height = S;
+  radarTex = new THREE.CanvasTexture(radarCanvas);
+  const rplane = new THREE.Mesh(new THREE.PlaneGeometry(WORLD, WORLD), new THREE.MeshBasicMaterial({map:radarTex, transparent:true, opacity:.55, depthWrite:false}));
+  rplane.rotation.x = -Math.PI/2; rplane.position.y = 0.01; scene.add(rplane);
+
+  const g = new THREE.BoxGeometry(1,1,1); g.translate(0,0.5,0);
+  cols = new THREE.InstancedMesh(g, new THREE.MeshLambertMaterial({transparent:true, opacity:.88}), N*N);
+  cols.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  cols.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(N*N*3), 3);
+  cols.count = 0; scene.add(cols);
+
+  ring = new THREE.Mesh(new THREE.RingGeometry(0.22,0.3,40), new THREE.MeshBasicMaterial({color:0x85b7eb, transparent:true, side:THREE.DoubleSide}));
+  ring.rotation.x = -Math.PI/2; ring.position.y = 0.03; scene.add(ring);
+  pin = new THREE.Mesh(new THREE.SphereGeometry(0.12,20,16), new THREE.MeshBasicMaterial({color:0x85b7eb}));
+  pin.position.y = 0.12; scene.add(pin);
+}catch(e){ mode = 'flat'; }
+
+function glSetBase(){
+  baseTex.image = baseCanvas; baseTex.needsUpdate = true;
+}
+function resize(){
+  if (mode !== 'gl') return;
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+/* ---------- gyro parallax ---------- */
+let gx = 0, gy = 0, tgx = 0, tgy = 0;
+addEventListener('deviceorientation', e => {
+  if (e.gamma == null) return;
+  const land = Math.abs(screen.orientation ? screen.orientation.angle : window.orientation||0) === 90;
+  const a = land ? e.beta : e.gamma, b = land ? e.gamma : e.beta;
+  tgx = Math.max(-1, Math.min(1, (a||0)/30));
+  tgy = Math.max(-1, Math.min(1, ((b||0)-45)/40));
+});
+
+/* ---------- animation ---------- */
+const STEP = 0.55, HOLD = 2.5;
+let shown = -1;
+function frameAt(t){
+  const F = frames.length, cycle = (F-1)*STEP + HOLD, u = t % cycle;
+  return Math.min(F-1, u/STEP);
+}
+function setTimeline(f){
+  const F = frames.length; if (!F) return;
+  $('prog').style.width = (f/(F-1)*100) + '%';
+  const off = frames[Math.round(f)].off;
+  $('tlabel').textContent = off ? `−${off} min` : 'Now';
+}
+function render(ms){
+  requestAnimationFrame(render);
+  const t = ms/1000;
+  if (Date.now() - loadedAt > 300000 && loadedAt) { loadedAt = Date.now(); loadAll(); }
+  if (!frames.length) { if (mode==='gl') { placeCam(t); renderer.render(scene,camera); } return; }
+  const f = frameAt(t); setTimeline(f);
+  if (mode === 'flat') return flatFrame(Math.round(f), t);
+  const f0 = Math.floor(f), f1 = Math.min(frames.length-1, f0+1), a = f - f0;
+  const A = frames[f0], B = frames[f1], C = a < .5 ? A : B;
+  if (shown !== Math.round(f)){
+    shown = Math.round(f);
+    const x = radarCanvas.getContext('2d'); x.clearRect(0,0,S,S); x.drawImage(frames[shown].canvas,0,0);
+    radarTex.needsUpdate = true;
+  }
+  const M = cols.instanceMatrix.array, Cc = cols.instanceColor.array, cw = WORLD/N*0.82;
+  let n = 0;
+  for (let k=0;k<N*N;k++){
+    const v = A.h[k]*(1-a) + B.h[k]*a; if (v < 0.13) continue;
+    const hgt = Math.pow(v,1.6)*MAXH + 0.02, i = k%N, j = (k/N)|0, o = n*16;
+    M[o]=cw;M[o+1]=0;M[o+2]=0;M[o+3]=0; M[o+4]=0;M[o+5]=hgt;M[o+6]=0;M[o+7]=0;
+    M[o+8]=0;M[o+9]=0;M[o+10]=cw;M[o+11]=0;
+    M[o+12]=(i+.5)/N*WORLD-WORLD/2; M[o+13]=0; M[o+14]=(j+.5)/N*WORLD-WORLD/2; M[o+15]=1;
+    Cc[n*3]=C.col[k*3]; Cc[n*3+1]=C.col[k*3+1]; Cc[n*3+2]=C.col[k*3+2]; n++;
+  }
+  cols.count = n; cols.instanceMatrix.needsUpdate = true; cols.instanceColor.needsUpdate = true;
+  const p = (t % 2.4)/2.4; ring.scale.setScalar(1 + p*2.2); ring.material.opacity = 1 - p;
+  placeCam(t); renderer.render(scene, camera);
+}
+function placeCam(t){
+  gx += (tgx-gx)*0.05; gy += (tgy-gy)*0.05;
+  const az = Math.sin(t/45)*0.5 + gx*0.35, el = 0.88 + Math.sin(t/31)*0.06 - gy*0.12, R = 16.5;
+  camera.position.set(Math.sin(az)*Math.cos(el)*R, Math.sin(el)*R, Math.cos(az)*Math.cos(el)*R);
+  camera.lookAt(0, 0, 0);
+}
+
+/* ---------- fallback: CSS 3D (no WebGL / blocked tiles) ---------- */
+let flatLayers = [];
+function fallback(tiles, bust){
+  mode = 'flat'; $('gl').style.display = 'none'; $('flat').style.display = 'flex';
+  const inner = $('flatInner'); inner.innerHTML = '';
+  const sc = Math.max(innerWidth, innerHeight)/S*1.15;
+  tiles.forEach(t => { const i = new Image(); i.src = baseUrl(t); i.style.left=t.dx+'px'; i.style.top=t.dy+'px'; inner.appendChild(i); });
+  flatLayers = OFFS.map(off => {
+    const d = document.createElement('div'); d.style.cssText = 'position:absolute;inset:0;opacity:0;transition:opacity .3s';
+    tiles.forEach(t => { const i = new Image(); i.src = radarUrl(t, off, bust); i.style.left=t.dx+'px'; i.style.top=t.dy+'px'; i.style.opacity=.85; d.appendChild(i); });
+    inner.appendChild(d); return d;
+  });
+  const dot = document.createElement('div');
+  dot.style.cssText = 'position:absolute;left:506px;top:506px;width:12px;height:12px;border-radius:50%;background:#85b7eb;box-shadow:0 0 0 6px rgba(133,183,235,.3)';
+  inner.appendChild(dot);
+  inner.dataset.sc = sc;
+  frames = OFFS.map(off => ({off})); loadedAt = Date.now(); $('status').textContent = '';
+}
+function flatFrame(f, t){
+  flatLayers.forEach((d,k) => d.style.opacity = k===f ? 1 : 0);
+  gx += (tgx-gx)*0.05; gy += (tgy-gy)*0.05;
+  const inner = $('flatInner'), sc = inner.dataset.sc || 1;
+  inner.style.transform = `scale(${sc}) rotateX(${50 + gy*6}deg) rotateZ(${Math.sin(t/45)*14 + gx*8}deg)`;
+}
+
+/* ---------- start ---------- */
+function start(){ weather(); setInterval(weather, 600000); loadAll(); requestAnimationFrame(render); }
+if (!Q.get('lat') && navigator.geolocation){
+  let done = false; const go = () => { if (!done){ done = true; start(); } };
+  navigator.geolocation.getCurrentPosition(p => {
+    const d = Math.hypot(p.coords.latitude-LAT, p.coords.longitude-LON);
+    if (d > 0.3){ LAT = p.coords.latitude; LON = p.coords.longitude; $('place').textContent = 'Your location'; }
+    go();
+  }, go, {timeout:4000, maximumAge:600000});
+  setTimeout(go, 4500);
+} else start();
+if (mode === 'flat') $('gl').style.display = 'none';
+}
+</script>
+</body>
+</html>
