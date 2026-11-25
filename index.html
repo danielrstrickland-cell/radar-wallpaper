@@ -106,7 +106,9 @@ function tileList(){
       out.push({tx, ty, dx: Math.round(tx*256-x0), dy: Math.round(ty*256-y0)});
   return out;
 }
-const baseUrl = t => `https://${'abcd'[(t.tx+t.ty)&3]}.basemaps.cartocdn.com/dark_all/${Z}/${t.tx}/${t.ty}.png`;
+const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/';
+const baseUrl = t => `${ESRI}World_Dark_Gray_Base/MapServer/tile/${Z}/${t.ty}/${t.tx}`;
+const labelUrl = t => `${ESRI}World_Dark_Gray_Reference/MapServer/tile/${Z}/${t.ty}/${t.tx}`;
 const radarUrl = (t, off, bust) => `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913${off ? '-m'+String(off).padStart(2,'0')+'m' : ''}/${Z}/${t.tx}/${t.ty}.png?_=${bust}`;
 const loadImg = (src, cors) => new Promise(res => {
   const i = new Image(); if (cors) i.crossOrigin = 'anonymous';
@@ -141,6 +143,8 @@ async function loadAll(){
   const bx = bc.getContext('2d');
   const bimgs = await Promise.all(tiles.map(t => loadImg(baseUrl(t), true)));
   bimgs.forEach((im,k) => im && bx.drawImage(im, tiles[k].dx, tiles[k].dy));
+  const limgs = await Promise.all(tiles.map(t => loadImg(labelUrl(t), true)));
+  limgs.forEach((im,k) => im && bx.drawImage(im, tiles[k].dx, tiles[k].dy));
   // radar frames
   const out = [];
   for (const off of OFFS){
@@ -272,7 +276,7 @@ function fallback(tiles, bust){
   mode = 'flat'; $('gl').style.display = 'none'; $('flat').style.display = 'flex';
   const inner = $('flatInner'); inner.innerHTML = '';
   const sc = Math.max(innerWidth, innerHeight)/S*1.15;
-  tiles.forEach(t => { const i = new Image(); i.src = baseUrl(t); i.style.left=t.dx+'px'; i.style.top=t.dy+'px'; inner.appendChild(i); });
+  tiles.forEach(t => { for (const u of [baseUrl(t), labelUrl(t)]) { const i = new Image(); i.src = u; i.style.left=t.dx+'px'; i.style.top=t.dy+'px'; inner.appendChild(i); } });
   flatLayers = OFFS.map(off => {
     const d = document.createElement('div'); d.style.cssText = 'position:absolute;inset:0;opacity:0;transition:opacity .3s';
     tiles.forEach(t => { const i = new Image(); i.src = radarUrl(t, off, bust); i.style.left=t.dx+'px'; i.style.top=t.dy+'px'; i.style.opacity=.85; d.appendChild(i); });
